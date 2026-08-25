@@ -61,18 +61,28 @@
   .manualRow span{font-size:.8rem}
   .manualRow input[type=range]{width:100%;accent-color:var(--accent)}
   .manualVal{font-weight:700;text-align:right;font-size:.85rem}
+
+  .tableWrap{overflow-x:auto}
+  .ratingTable{border-collapse:collapse;font-size:.72rem}
+  .ratingTable th,.ratingTable td{padding:5px 7px;border:1px solid var(--border);text-align:center;white-space:nowrap}
+  .ratingTable th.axisHead{white-space:normal;max-width:70px;font-size:.65rem;color:var(--muted);font-weight:600}
+  .ratingTable td.wireName{text-align:left;font-weight:600;white-space:normal;max-width:220px}
+  .ratingTable td.touched::after{content:" \270e";opacity:.55;font-size:.65rem}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="btnRow" style="margin:0 0 16px">
     <button class="ghost" id="downloadBtn">Скачать результаты</button>
+    <button class="ghost" id="uploadBtn">Загрузить файл сессии</button>
     <button class="ghost" id="resetBtn">Сбросить всё</button>
+    <input type="file" id="fileInput" accept="application/json" style="display:none">
   </div>
 
   <div class="tabs">
     <button class="tabBtn active" id="tabBtnCompare">Попарное сравнение</button>
-    <button class="tabBtn" id="tabBtnManual">Параметры</button>
+    <button class="tabBtn" id="tabBtnManual">Ручная корректировка</button>
+    <button class="tabBtn" id="tabBtnTable">Таблица весов</button>
   </div>
 
   <div id="tab-compare">
@@ -80,7 +90,7 @@
 
     <div class="panel">
       <h3 style="margin-top:0">Сводка по проволокам</h3>
-      <p class="sub" style="margin-bottom:14px">Среднее по всем собранным сравнениям для каждого критерия (от −1 до +1). Серая полоса — данных ещё нет.</p>
+      <p class="sub" style="margin-bottom:14px">Единая оценка по каждому критерию (от −2 до +2): складывается из попарных сравнений и ручных правок — оба режима работают с одними и теми же числами. Серая полоса — данных ещё нет.</p>
       <div id="wireSummary"></div>
     </div>
 
@@ -92,6 +102,14 @@
 
   <div id="tab-manual" style="display:none">
     <div class="panel" id="manualPanel"></div>
+  </div>
+
+  <div id="tab-table" style="display:none">
+    <div class="panel">
+      <h3 style="margin-top:0">Таблица весов</h3>
+      <p class="sub" style="margin-bottom:14px">Та же единая матрица «проволока × критерий», что и на других вкладках. Цвет — знак и сила оценки (−2…+2), ✎ — ячейка правилась вручную. Наведите на ячейку для деталей.</p>
+      <div class="tableWrap"><table class="ratingTable" id="ratingTableEl"></table></div>
+    </div>
   </div>
 </div>
 
@@ -119,22 +137,79 @@ const WIRES = [
 ];
 
 const AXES = [
-  {id:"load_capacity", label:"Повышенная стойкость к обрыву / нагрузке"},
-  {id:"speed", label:"Подходит для высокоскоростной резки"},
-  {id:"precision", label:"Подходит для высокоточной обработки"},
-  {id:"surface_finish", label:"Обеспечивает высокое качество поверхности (Ra)"},
-  {id:"fine_geometry", label:"Подходит для деталей со сложной / мелкой геометрией"},
-  {id:"taper_fit", label:"Подходит для резки под углом более 10 градусов"},
-  {id:"finish_role_fit", label:"Подходит для финишного прохода при многопроходной резки"},
-  {id:"thickness_capacity", label:"Подходит для работы с толстой заготовкой / высокой нагрузкой / пакетной резкой"},
-  {id:"micro_edm_fit", label:"Подходит для микроэрозионной обработки"}
+  {id:"load_capacity", label:"Повышенная стойкость к обрыву / нагрузке", short:"Стойкость к обрыву"},
+  {id:"speed", label:"Подходит для высокоскоростной резки", short:"Скорость"},
+  {id:"precision", label:"Подходит для высокоточной обработки", short:"Точность"},
+  {id:"surface_finish", label:"Обеспечивает высокое качество поверхности (Ra)", short:"Ra"},
+  {id:"fine_geometry", label:"Подходит для деталей со сложной / мелкой геометрией", short:"Мелкая геометрия"},
+  {id:"taper_fit", label:"Подходит для резки под углом более 10 градусов", short:"Угол >10°"},
+  {id:"finish_role_fit", label:"Подходит для финишного прохода при многопроходной резки", short:"Финишный проход"},
+  {id:"thickness_capacity", label:"Подходит для работы с толстой заготовкой / высокой нагрузкой / пакетной резкой", short:"Толщина/нагрузка"},
+  {id:"micro_edm_fit", label:"Подходит для микроэрозионной обработки", short:"Микроэрозия"}
 ];
-
-// Ничего не сохраняется между обновлениями страницы — только скачивание файла.
-let answers = [];
 
 function axisLabel(id){ return AXES.find(a=>a.id===id)?.label || id; }
 
+/* ==================== единое состояние: попарные сравнения и ручные правки пишут в одни и те же числа ==================== */
+// Ничего не сохраняется между обновлениями страницы — только скачивание/загрузка файла сессии.
+let events = []; // {type:'compare', wireA, wireB, axis, axisLabel, answer, timestamp} | {type:'manual', wire, axis, value, timestamp}
+let ratings = {}, counts = {}, manualTouched = {};
+
+const NUDGE = 0.25; // на сколько один попарный ответ сдвигает рейтинг
+
+function clamp2(v){ return Math.max(-2, Math.min(2, v)); }
+
+function initState(){
+  ratings = {}; counts = {}; manualTouched = {};
+  WIRES.forEach(w=>{
+    ratings[w] = {}; counts[w] = {}; manualTouched[w] = {};
+    AXES.forEach(a=>{ ratings[w][a.id] = 0; counts[w][a.id] = 0; manualTouched[w][a.id] = false; });
+  });
+}
+
+function applyEvent(e){
+  if(e.type === "compare"){
+    if(!ratings[e.wireA] || !ratings[e.wireB]) return;
+    if(e.answer === "A"){
+      ratings[e.wireA][e.axis] = clamp2(ratings[e.wireA][e.axis] + NUDGE);
+      ratings[e.wireB][e.axis] = clamp2(ratings[e.wireB][e.axis] - NUDGE);
+    } else if(e.answer === "B"){
+      ratings[e.wireB][e.axis] = clamp2(ratings[e.wireB][e.axis] + NUDGE);
+      ratings[e.wireA][e.axis] = clamp2(ratings[e.wireA][e.axis] - NUDGE);
+    }
+    // "equal" двигает только счётчик данных, не сам рейтинг; "unknown" не считается вовсе
+    if(e.answer !== "unknown"){
+      counts[e.wireA][e.axis]++;
+      counts[e.wireB][e.axis]++;
+    }
+  } else if(e.type === "manual"){
+    if(!ratings[e.wire]) return;
+    ratings[e.wire][e.axis] = clamp2(e.value);
+    manualTouched[e.wire][e.axis] = true;
+  }
+}
+
+function recompute(){
+  initState();
+  events.forEach(applyEvent);
+}
+
+function pushEvent(e){
+  e.timestamp = new Date().toISOString();
+  events.push(e);
+  applyEvent(e);
+}
+
+function renderAll(){
+  renderLog();
+  renderWireSummary();
+  renderManualTab();
+  renderRatingTable();
+}
+
+initState();
+
+/* ==================== вкладка 1: попарное сравнение ==================== */
 function randomWirePair(){
   const i = Math.floor(Math.random()*WIRES.length);
   let j = Math.floor(Math.random()*WIRES.length);
@@ -170,56 +245,33 @@ function renderQuestion(){
 
   panel.querySelectorAll(".optBtn").forEach(btn=>{
     btn.onclick = ()=>{
-      answers.push({
-        wireA:q.wireA, wireB:q.wireB, axis:q.axis, axisLabel:axisLabel(q.axis),
-        answer:btn.dataset.key, timestamp:new Date().toISOString()
-      });
-      renderLog();
-      renderWireSummary();
+      pushEvent({wireA:q.wireA, wireB:q.wireB, axis:q.axis, axisLabel:axisLabel(q.axis), answer:btn.dataset.key, type:"compare"});
+      renderAll();
       generateQuestion();
     };
   });
 }
 
-function computeStats(){
-  const stats = {};
-  WIRES.forEach(w=>{
-    stats[w] = {};
-    AXES.forEach(a=> stats[w][a.id] = {sum:0, count:0});
-  });
-  answers.forEach(r=>{
-    if(!stats[r.wireA] || !stats[r.wireB]) return;
-    const sa = stats[r.wireA][r.axis], sb = stats[r.wireB][r.axis];
-    if(!sa || !sb) return;
-    if(r.answer === "A"){ sa.sum+=1; sb.sum-=1; sa.count+=1; sb.count+=1; }
-    else if(r.answer === "B"){ sa.sum-=1; sb.sum+=1; sa.count+=1; sb.count+=1; }
-    else if(r.answer === "equal"){ sa.count+=1; sb.count+=1; }
-    // "unknown" не считается ни в чью пользу и не увеличивает count
-  });
-  return stats;
-}
-
 function renderWireSummary(){
-  const stats = computeStats();
   const el = document.getElementById("wireSummary");
   el.innerHTML = WIRES.map(w=>{
-    const totalN = AXES.reduce((n,a)=> n + stats[w][a.id].count, 0);
+    const totalN = AXES.reduce((n,a)=> n + counts[w][a.id], 0);
     const rows = AXES.map(a=>{
-      const s = stats[w][a.id];
-      if(s.count === 0){
+      const n = counts[w][a.id], touched = manualTouched[w][a.id];
+      if(n === 0 && !touched){
         return `<div class="barRow">
           <div>${a.label}</div>
           <div class="barTrack"><div class="barFill empty"></div></div>
           <div>—</div>
         </div>`;
       }
-      const avg = s.sum / s.count; // -1..+1
-      const pct = Math.abs(avg) * 50;
-      const side = avg >= 0 ? `left:50%;right:auto;width:${pct}%` : `left:auto;right:50%;width:${pct}%`;
+      const v = ratings[w][a.id]; // -2..+2
+      const pct = Math.abs(v) / 2 * 50;
+      const side = v >= 0 ? `left:50%;right:auto;width:${pct}%` : `left:auto;right:50%;width:${pct}%`;
       return `<div class="barRow">
-        <div>${a.label}</div>
-        <div class="barTrack"><div class="barFill${avg<0?' neg':''}" style="${side}"></div></div>
-        <div>${avg>0?'+':''}${avg.toFixed(1)}</div>
+        <div>${a.label}${touched?' <span class="n">(правилось вручную)</span>':''}</div>
+        <div class="barTrack"><div class="barFill${v<0?' neg':''}" style="${side}"></div></div>
+        <div>${v>0?'+':''}${v.toFixed(2)}</div>
       </div>`;
     }).join("");
     return `<div class="wireBlock">
@@ -230,40 +282,33 @@ function renderWireSummary(){
 }
 
 function renderLog(){
-  document.getElementById("cnt").textContent = answers.length;
+  document.getElementById("cnt").textContent = events.length;
   const log = document.getElementById("log");
-  if(answers.length===0){ log.innerHTML = `<p class="empty">Пока нет ответов.</p>`; return; }
-  const rows = answers.slice().reverse().slice(0,50).map(r=>`
-    <tr>
+  if(events.length===0){ log.innerHTML = `<p class="empty">Пока нет данных.</p>`; return; }
+  const rows = events.slice().reverse().slice(0,50).map(r=>{
+    if(r.type === "manual"){
+      return `<tr><td>${r.wire}</td><td>—</td><td>${axisLabel(r.axis)}</td><td>Ручная правка: ${r.value>0?'+':''}${r.value}</td></tr>`;
+    }
+    return `<tr>
       <td>${r.wireA}</td><td>${r.wireB}</td>
       <td>${r.axisLabel}</td>
       <td>${r.answer==="A"?r.wireA+" лучше":r.answer==="B"?r.wireB+" лучше":r.answer==="equal"?"Одинаково":"Не знаю"}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
   log.innerHTML = `<table><thead><tr><th>A</th><th>B</th><th>Критерий</th><th>Ответ</th></tr></thead><tbody>${rows}</tbody></table>
-    ${answers.length>50?`<p class="empty">Показаны последние 50 из ${answers.length}.</p>`:""}`;
+    ${events.length>50?`<p class="empty">Показаны последние 50 из ${events.length}.</p>`:""}`;
 }
 
-generateQuestion();
-renderLog();
-renderWireSummary();
-
-/* ==================== Вкладка 2: прямая настройка параметров ==================== */
-// Ничего не сохраняется между обновлениями страницы — только скачивание файла.
-let manualRatings = {};
-WIRES.forEach(w=>{
-  manualRatings[w] = {};
-  AXES.forEach(a=> manualRatings[w][a.id] = 0);
-});
-
+/* ==================== вкладка 2: ручная правка тех же чисел ==================== */
 function renderManualTab(){
   const el = document.getElementById("manualPanel");
   el.innerHTML = WIRES.map(w=>{
     const rows = AXES.map(a=>{
-      const v = manualRatings[w][a.id];
+      const v = ratings[w][a.id], n = counts[w][a.id], touched = manualTouched[w][a.id];
       return `<div class="manualRow">
-        <span>${a.label}</span>
-        <input type="range" min="-2" max="2" step="1" value="${v}" data-wire="${w}" data-axis="${a.id}">
-        <span class="manualVal" id="mval_${w}_${a.id}">${v>0?'+':''}${v}</span>
+        <span>${a.label} <span class="n" style="font-size:.7rem">(${n} сравн.${touched?', есть ручная правка':''})</span></span>
+        <input type="range" min="-2" max="2" step="1" value="${Math.round(v)}" data-wire="${w}" data-axis="${a.id}">
+        <span class="manualVal" id="mval_${w}_${a.id}">${v>0?'+':''}${v.toFixed(2)}</span>
       </div>`;
     }).join("");
     return `<div class="wireBlock"><h4>${w}</h4>${rows}</div>`;
@@ -273,51 +318,97 @@ function renderManualTab(){
     inp.oninput = ()=>{
       const w = inp.dataset.wire, a = inp.dataset.axis;
       const v = Number(inp.value);
-      manualRatings[w][a] = v;
+      pushEvent({type:"manual", wire:w, axis:a, value:v});
       const valEl = document.getElementById(`mval_${w}_${a}`);
-      valEl.textContent = (v>0?'+':'') + v;
+      valEl.textContent = (v>0?'+':'') + v.toFixed(2);
+      renderWireSummary();
+      renderRatingTable();
     };
   });
 }
-renderManualTab();
+
+/* ==================== вкладка 3: таблица весов (та же матрица целиком) ==================== */
+function ratingCellStyle(v, hasData){
+  if(!hasData) return `background:var(--panel2);color:var(--muted)`;
+  const pct = Math.min(Math.abs(v)/2, 1);
+  const alpha = (0.12 + pct*0.68).toFixed(2);
+  const rgb = v >= 0 ? "245,168,18" : "178,58,47";
+  return `background:rgba(${rgb},${alpha});color:#131110`;
+}
+
+function renderRatingTable(){
+  const el = document.getElementById("ratingTableEl");
+  const head = `<tr><th style="position:sticky;left:0;background:var(--panel2)">Проволока</th>${AXES.map(a=>`<th class="axisHead" title="${a.label}">${a.short}</th>`).join("")}</tr>`;
+  const rows = WIRES.map(w=>{
+    const cells = AXES.map(a=>{
+      const n = counts[w][a.id], touched = manualTouched[w][a.id];
+      const hasData = n>0 || touched;
+      const v = ratings[w][a.id];
+      const text = hasData ? `${v>0?'+':''}${v.toFixed(2)}` : "—";
+      const nWord = n===1?'сравнение':n>=2&&n<=4?'сравнения':'сравнений';
+      return `<td class="${touched?'touched':''}" style="${ratingCellStyle(v,hasData)}" title="${a.label}: ${n} ${nWord}${touched?', ручная правка':''}">${text}</td>`;
+    }).join("");
+    return `<tr><td class="wireName">${w}</td>${cells}</tr>`;
+  }).join("");
+  el.innerHTML = `<thead>${head}</thead><tbody>${rows}</tbody>`;
+}
 
 /* ==================== переключение вкладок + общие кнопки ==================== */
-let activeTab = "compare";
-const tabBtnCompare = document.getElementById("tabBtnCompare");
-const tabBtnManual = document.getElementById("tabBtnManual");
-const tabCompare = document.getElementById("tab-compare");
-const tabManual = document.getElementById("tab-manual");
-tabBtnCompare.onclick = ()=>{
-  activeTab = "compare";
-  tabBtnCompare.classList.add("active"); tabBtnManual.classList.remove("active");
-  tabCompare.style.display = "block"; tabManual.style.display = "none";
+const tabs = {
+  compare: {btn: document.getElementById("tabBtnCompare"), panel: document.getElementById("tab-compare")},
+  manual:  {btn: document.getElementById("tabBtnManual"),  panel: document.getElementById("tab-manual")},
+  table:   {btn: document.getElementById("tabBtnTable"),   panel: document.getElementById("tab-table")}
 };
-tabBtnManual.onclick = ()=>{
-  activeTab = "manual";
-  tabBtnManual.classList.add("active"); tabBtnCompare.classList.remove("active");
-  tabCompare.style.display = "none"; tabManual.style.display = "block";
-};
+function switchTab(name){
+  Object.entries(tabs).forEach(([k,t])=>{
+    t.btn.classList.toggle("active", k===name);
+    t.panel.style.display = k===name ? "block" : "none";
+  });
+}
+tabs.compare.btn.onclick = ()=>switchTab("compare");
+tabs.manual.btn.onclick = ()=>switchTab("manual");
+tabs.table.btn.onclick = ()=>switchTab("table");
 
 document.getElementById("downloadBtn").onclick = ()=>{
-  const data = activeTab === "compare" ? answers : manualRatings;
-  const filename = activeTab === "compare" ? "artacut_comparisons.json" : "artacut_manual_ratings.json";
-  const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
+  const blob = new Blob([JSON.stringify(events, null, 2)], {type:"application/json"});
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a"); a.href=url; a.download=filename; a.click();
+  const a = document.createElement("a"); a.href=url; a.download="artacut_session.json"; a.click();
   URL.revokeObjectURL(url);
 };
+
+document.getElementById("uploadBtn").onclick = ()=> document.getElementById("fileInput").click();
+document.getElementById("fileInput").onchange = (ev)=>{
+  const file = ev.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    try{
+      const parsed = JSON.parse(reader.result);
+      if(!Array.isArray(parsed)) throw new Error("bad format");
+      events = parsed;
+      recompute();
+      renderAll();
+      generateQuestion();
+      alert(`Загружено ${events.length} записей из файла сессии. Можно продолжать.`);
+    }catch(err){
+      alert("Не удалось прочитать файл: это не похоже на файл сессии этого инструмента.");
+    }
+  };
+  reader.readAsText(file);
+  ev.target.value = "";
+};
+
 document.getElementById("resetBtn").onclick = ()=>{
-  if(activeTab === "compare"){
-    if(confirm("Удалить все собранные ответы без возможности восстановления?")){
-      answers = []; renderLog(); renderWireSummary();
-    }
-  } else {
-    if(confirm("Сбросить все ручные оценки в 0?")){
-      WIRES.forEach(w=> AXES.forEach(a=> manualRatings[w][a.id] = 0));
-      renderManualTab();
-    }
+  if(confirm("Удалить все собранные данные (сравнения и ручные правки) без возможности восстановления?")){
+    events = [];
+    recompute();
+    renderAll();
+    generateQuestion();
   }
 };
+
+generateQuestion();
+renderAll();
 </script>
 </body>
 </html>
