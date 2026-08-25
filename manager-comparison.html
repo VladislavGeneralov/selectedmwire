@@ -307,7 +307,7 @@ function renderManualTab(){
       const v = ratings[w][a.id], n = counts[w][a.id], touched = manualTouched[w][a.id];
       return `<div class="manualRow">
         <span>${a.label} <span class="n" style="font-size:.7rem">(${n} сравн.${touched?', есть ручная правка':''})</span></span>
-        <input type="range" min="-2" max="2" step="1" value="${Math.round(v)}" data-wire="${w}" data-axis="${a.id}">
+        <input type="range" min="-2" max="2" step="0.1" value="${v.toFixed(1)}" data-wire="${w}" data-axis="${a.id}">
         <span class="manualVal" id="mval_${w}_${a.id}">${v>0?'+':''}${v.toFixed(2)}</span>
       </div>`;
     }).join("");
@@ -317,7 +317,7 @@ function renderManualTab(){
   el.querySelectorAll('input[type=range]').forEach(inp=>{
     inp.oninput = ()=>{
       const w = inp.dataset.wire, a = inp.dataset.axis;
-      const v = Number(inp.value);
+      const v = Math.round(Number(inp.value)*10)/10;
       pushEvent({type:"manual", wire:w, axis:a, value:v});
       const valEl = document.getElementById(`mval_${w}_${a}`);
       valEl.textContent = (v>0?'+':'') + v.toFixed(2);
